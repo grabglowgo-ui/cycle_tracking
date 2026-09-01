@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Cycle Diary</title>
+<link rel="manifest" href="manifest.json"/>
+<meta name="theme-color" content="#566246"/>
+<link rel="icon" href="icons/icon-192.png"/>
+<link rel="apple-touch-icon" href="icons/icon-192.png"/>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>html,body{margin:0;padding:0;background:#F7F2E9;}#root{min-height:100vh;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+  // Minimal localStorage-backed stand-in for the Claude-artifact window.storage API,
+  // so the app works standalone with no Claude account or login required.
+  window.storage = {
+    async get(key) {
+      const v = localStorage.getItem("ctstore_" + key);
+      return v != null ? { key, value: v, shared: false } : null;
+    },
+    async set(key, value) {
+      localStorage.setItem("ctstore_" + key, value);
+      return { key, value, shared: false };
+    },
+    async delete(key) {
+      localStorage.removeItem("ctstore_" + key);
+      return { key, deleted: true, shared: false };
+    },
+    async list(prefix) {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith("ctstore_" + (prefix || ""))) keys.push(k.replace("ctstore_", ""));
+      }
+      return { keys, shared: false };
+    },
+  };
+</script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo } = React;
+
+
+/* ---------------- date helpers ---------------- */
+const toDate = (s) => { const [y, m, d] = s.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d)); };
+const toStr = (dt) => dt.toISOString().slice(0, 10);
+const addDays = (s, n) => { const dt = toDate(s); dt.setUTCDate(dt.getUTCDate() + n); return toStr(dt); };
+const daysBetween = (a, b) => Math.round((toDate(b) - toDate(a)) / 86400000);
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const humanDate = (s) => toDate(s).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+const humanShort = (s) => toDate(s).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+/* ---------------- vocab ---------------- */
+const SYMPTOMS = [
+  { id: "headache", label: "Headache" }, { id: "migraine", label: "Migraine" },
+  { id: "cramps", label: "Cramps" }, { id: "backpain", label: "Back pain" },
+  { id: "jointache", label: "Joint / muscle aches" }, { id: "tenderness", label: "Breast tenderness" },
+  { id: "bloating", label: "Bloating" }, { id: "breakouts", label: "Skin breakouts" },
+  { id: "nausea", label: "Nausea" }, { id: "dizziness", label: "Dizziness" },
+  { id: "hotflashes", label: "Hot flashes" }, { id: "digestive", label: "Digestive upset" },
+  { id: "insomnia", label: "Insomnia" }, { id: "anxiety", label: "Anxiety" },
+  { id: "irritability", label: "Irritability" }, { id: "cravings", label: "Food cravings" },
+  { id: "fatigue", label: "Fatigue" }, { id: "brainfog", label: "Brain fog" },
+];
+const SEVERITY_LEVELS = ["None", "Mild", "Moderate", "Extreme"];
+const SEVERITY_COLORS = ["transparent", "#E3C9A0", "#D69B5C", "#B5573A"];
+const FLOWS = [{ id: "none", label: "None" }, { id: "spotting", label: "Spotting" }, { id: "light", label: "Light" }, { id: "medium", label: "Medium" }, { id: "heavy", label: "Heavy" }];
+const FLOW_COLOR = { none: "transparent", spotting: "#E8D3D8", light: "#D9A9B2", medium: "#C27A8A", heavy: "#8F4757" };
+const DISCHARGE_OPTIONS = ["Dry", "Sticky", "Creamy", "Watery", "Egg white", "Other"];
+const EXERCISE_OPTIONS = ["None", "Light", "Moderate", "Intense"];
+const NEED_OPTIONS = ["Rest", "Quiet", "Stimulation", "Excitement", "Connection", "Space"];
+const MOOD_EMOJI = ["😣", "😕", "😐", "🙂", "😄"];
+const SCALE_LABELS = { energy: ["Depleted", "Low", "Steady", "Good", "High"], comfort: ["High pain", "Uncomfortable", "Okay", "Comfortable", "Great"], libido: ["None", "Low", "Some", "Strong", "High"], sleep: ["Poor", "Rough", "Okay", "Good", "Great"], appetite: ["Very low", "Low", "Normal", "High", "Very high"] };
+const PHASES = { menstrual: { label: "Menstrual", color: "#C85C6B" }, follicular: { label: "Follicular", color: "#5B8A62" }, ovulation: { label: "Ovulation", color: "#8B5FA6" }, luteal: { label: "Luteal", color: "#5B7FA6" } };
+const METRICS = [{ id: "phase", label: "Cycle phase" }, { id: "flow", label: "Flow" }, { id: "energy", label: "Energy" }, { id: "mood", label: "Mood" }, { id: "comfort", label: "Comfort" }, { id: "sleep", label: "Sleep" }, { id: "appetite", label: "Appetite" }];
+const CHECKPOINTS = ["5 min", "30 min", "1 hr", "4 hr", "8 hr", "12 hr", "Next day"];
+const DEFAULT_FIELDS = { energy: true, mood: true, comfort: true, libido: true, sleep: true, appetite: true, exercise: true, need: true, discharge: true, support: true, notes: true };
+const FIELD_LABELS = { energy: "Energy", mood: "Mood", comfort: "Comfort", libido: "Libido", sleep: "Sleep", appetite: "Appetite", exercise: "Exercise", need: "Needs", discharge: "Discharge", support: "Support / remedies", notes: "Notes" };
+const DEFAULT_SETTINGS = { onboarded: false, ovulationTracking: true, age: "", avgCycleLength: 28, avgPeriodLength: 5, notifications: { enabled: false, time: "20:00" }, fields: { ...DEFAULT_FIELDS }, enabledSymptoms: SYMPTOMS.map((s) => s.id), patternNicknames: true, patternNicknameOverride: "" };
+const NICKNAME_BANK = {
+  energy: { up: { name: "Late Cycle Energy Bunny", desc: "Your energy tends to climb in your luteal phase, rather than dip like most people's." }, down: { name: "Luteal Low-Power Mode", desc: "Your energy tends to dip in your luteal phase." } },
+  mood: { up: { name: "Luteal Sunshine", desc: "Your mood tends to lift later in your cycle." }, down: { name: "PMS Storm Cloud", desc: "Your mood tends to dip in your luteal phase." } },
+  comfort: { up: { name: "Comfortable Luteal Coaster", desc: "You tend to feel more comfortable later in your cycle." }, down: { name: "Luteal Ouch Zone", desc: "Discomfort tends to rise in your luteal phase." } },
+  sleep: { up: { name: "Luteal Sleepy Bear", desc: "Sleep quality tends to improve in your luteal phase." }, down: { name: "Restless Luteal Nights", desc: "Sleep quality tends to dip in your luteal phase." } },
+  libido: { up: { name: "Follicular Spark", desc: "Libido tends to rise heading into your follicular / ovulation window." }, down: { name: "Luteal Quiet Season", desc: "Libido tends to dip in your luteal phase." } },
+};
+function computePatternInsight(cycles) {
+  const keys = ["energy", "mood", "comfort", "sleep", "libido"];
+  const collect = (phase, key) => { const vals = []; cycles.forEach((c) => c.days.forEach((d) => { if (d.phase === phase && d.entry?.[key]) vals.push(d.entry[key]); })); return vals; };
+  let best = null;
+  keys.forEach((key) => {
+    const fol = collect("follicular", key), lut = collect("luteal", key);
+    if (fol.length < 4 || lut.length < 4) return;
+    const avgFol = fol.reduce((a, b) => a + b, 0) / fol.length;
+    const avgLut = lut.reduce((a, b) => a + b, 0) / lut.length;
+    const diff = avgLut - avgFol;
+    if (Math.abs(diff) >= 1 && (!best || Math.abs(diff) > Math.abs(best.diff))) best = { key, diff };
+  });
+  if (!best) return null;
+  const dir = best.diff > 0 ? "up" : "down";
+  return { key: best.key, ...NICKNAME_BANK[best.key][dir] };
+}
+function PatternBanner({ insight, settings, saveSettings, onDismiss }) {
+  const [renaming, setRenaming] = useState(false);
+  const [draftName, setDraftName] = useState(settings.patternNicknameOverride || insight.name);
+  const shownName = settings.patternNicknameOverride || insight.name;
+  return (
+    <div className="ct-daycard" style={{ width: "auto", marginBottom: 18, background: "var(--paper-alt)", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
+      <div>
+        <div className="ct-small" style={{ marginBottom: 4 }}>We noticed a pattern</div>
+        {!renaming ? <div className="ct-title-sm">{shownName}</div> : <input className="ct-textinput" value={draftName} onChange={(e) => setDraftName(e.target.value)} style={{ maxWidth: 260 }} />}
+        <div className="ct-small" style={{ marginTop: 4 }}>{insight.desc}</div>
+      </div>
+      <div className="ct-row">
+        {!renaming ? <button className="ct-chip" onClick={() => setRenaming(true)}>Rename</button> : <button className="ct-chip" onClick={() => { saveSettings({ ...settings, patternNicknameOverride: draftName }); setRenaming(false); }}>Save</button>}
+        <button className="ct-chip" onClick={onDismiss}>Dismiss</button>
+      </div>
+    </div>
+  );
+}
+
+const emptyEntry = () => ({
+  periodStart: false, periodEnd: false, ovulationMarked: false, flow: "none", discharge: "",
+  energy: 0, mood: 0, comfort: 0, libido: 0, sleep: 0, appetite: 0,
+  exercise: "", need: "", symptoms: {}, support: "", supportRating: 0, notes: "",
+});
+
+/* ---------------- cycle math ---------------- */
+function computeCycles(entries) {
+  const starts = Object.keys(entries).filter((d) => entries[d]?.periodStart).sort();
+  if (starts.length === 0) return [];
+  const cycles = [];
+  for (let i = 0; i < starts.length; i++) {
+    const start = starts[i]; const next = starts[i + 1];
+    const end = next ? addDays(next, -1) : todayStr();
+    if (toDate(end) < toDate(start)) continue;
+    const length = next ? daysBetween(start, next) : daysBetween(start, todayStr()) + 1;
+    const days = []; let d = start;
+    while (toDate(d) <= toDate(end)) { days.push({ date: d, cycleDay: daysBetween(start, d) + 1, entry: entries[d] || null }); d = addDays(d, 1); }
+    cycles.push({ start, end, length, days, complete: !!next });
+  }
+  return cycles;
+}
+function computeStats(cycles, settings) {
+  const lens = cycles.filter((c) => c.complete).map((c) => c.length);
+  const avgLength = lens.length ? lens.reduce((a, b) => a + b, 0) / lens.length : (settings.avgCycleLength || 28);
+  const periodLens = cycles.map((c) => {
+    const endDay = c.days.find((d) => d.entry?.periodEnd);
+    if (endDay) return endDay.cycleDay;
+    return c.days.slice(0, 12).filter((d) => d.entry?.flow && d.entry.flow !== "none").length;
+  }).filter((n) => n > 0);
+  const avgPeriodLength = periodLens.length ? periodLens.reduce((a, b) => a + b, 0) / periodLens.length : (settings.avgPeriodLength || 5);
+  return { avgLength, avgPeriodLength };
+}
+function annotatePhases(cycles, stats, ovulationTracking) {
+  return cycles.map((cycle) => {
+    const explicitEnd = cycle.days.find((d) => d.entry?.periodEnd);
+    const periodLen = explicitEnd ? explicitEnd.cycleDay : Math.round(stats.avgPeriodLength);
+    const cycleLen = cycle.complete ? cycle.length : Math.round(stats.avgLength);
+    const manualOv = cycle.days.find((d) => d.entry?.ovulationMarked);
+    const ovDay = manualOv ? manualOv.cycleDay : Math.max(periodLen + 3, cycleLen - 14);
+    const days = cycle.days.map((d) => {
+      let phase;
+      if (!ovulationTracking) {
+        phase = d.cycleDay <= periodLen ? "menstrual" : d.cycleDay <= cycleLen / 2 ? "follicular" : "luteal";
+      } else {
+        const winStart = ovDay - 2, winEnd = ovDay + 1;
+        if (d.cycleDay <= periodLen) phase = "menstrual";
+        else if (d.cycleDay >= winStart && d.cycleDay <= winEnd) phase = "ovulation";
+        else if (d.cycleDay < winStart) phase = "follicular";
+        else phase = "luteal";
+      }
+      return { ...d, phase, phaseColor: PHASES[phase].color };
+    });
+    return { ...cycle, days, periodLen, ovDay };
+  });
+}
+function buildDateIndex(cycles) { const idx = {}; cycles.forEach((c) => c.days.forEach((d) => { idx[d.date] = d; })); return idx; }
+
+/* ---------------- shared bits ---------------- */
+function Chip({ active, onClick, children, color }) {
+  return <button onClick={onClick} className="ct-chip" style={{ background: active ? (color || "var(--sage)") : "transparent", color: active ? "#fff" : "var(--ink)", borderColor: active ? (color || "var(--sage)") : "var(--line)" }}>{children}</button>;
+}
+function Dots({ value, onChange, count = 5, labels }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ display: "flex", gap: 6 }}>
+        {Array.from({ length: count }).map((_, i) => (
+          <button key={i} onClick={() => onChange(i + 1 === value ? 0 : i + 1)} style={{ width: 20, height: 20, borderRadius: "50%", cursor: "pointer", border: "1.5px solid var(--sage)", background: i + 1 <= value ? "var(--sage)" : "transparent" }} />
+        ))}
+      </div>
+      {labels && value > 0 && <span className="ct-small">{labels[value - 1]}</span>}
+    </div>
+  );
+}
+function MoodPicker({ value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      {MOOD_EMOJI.map((e, i) => (
+        <button key={i} onClick={() => onChange(i + 1 === value ? 0 : i + 1)} style={{ fontSize: 20, border: "none", background: i + 1 === value ? "var(--paper-alt)" : "transparent", borderRadius: 6, padding: "2px 5px", cursor: "pointer", opacity: value && i + 1 !== value ? 0.4 : 1 }}>{e}</button>
+      ))}
+    </div>
+  );
+}
+function SeverityRow({ symptom, value, onChange }) {
+  return (
+    <div className="ct-symrow">
+      <span className="ct-symlabel">{symptom.label}</span>
+      <div className="ct-sevchips">
+        {SEVERITY_LEVELS.map((lvl, i) => (
+          <button key={lvl} className={`ct-sevchip${value === i && i > 0 ? " active" : ""}`} style={value === i && i > 0 ? { background: SEVERITY_COLORS[i], color: "#fff", borderColor: SEVERITY_COLORS[i] } : {}} onClick={() => onChange(i)}>{lvl}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+function MetricSelect({ value, onChange }) {
+  return <select className="ct-textinput" style={{ maxWidth: 180 }} value={value} onChange={(e) => onChange(e.target.value)}>{METRICS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>;
+}
+function colorForMetric(day, metric) {
+  if (!day) return "var(--paper-alt)";
+  if (metric === "phase") return day.phaseColor || "var(--paper-alt)";
+  if (metric === "flow") return day.entry?.flow && day.entry.flow !== "none" ? FLOW_COLOR[day.entry.flow] : "var(--paper-alt)";
+  const val = day.entry?.[metric];
+  if (!val) return "var(--paper-alt)";
+  return `rgba(86,98,70,${0.22 + (val / 5) * 0.68})`;
+}
+function EmptyState({ text }) { return <div className="ct-empty">{text}</div>; }
+
+/* ---------------- Onboarding ---------------- */
+function Onboarding({ onFinish }) {
+  const [step, setStep] = useState(0);
+  const [draft, setDraft] = useState({ age: "", lastPeriodStart: todayStr(), avgCycleLength: 28, avgPeriodLength: 5, ovulationTracking: true, notifEnabled: false, notifTime: "20:00", fields: { ...DEFAULT_FIELDS } });
+  const steps = ["About you", "Your cycle", "Reminders", "Customize", "Done"];
+  const next = () => setStep((s) => Math.min(s + 1, steps.length - 1));
+  const back = () => setStep((s) => Math.max(s - 1, 0));
+
+  return (
+    <div className="ct-page">
+      <div className="ct-heading">Welcome</div>
+      <div className="ct-small" style={{ marginBottom: 20 }}>A few quick questions to set up your diary — step {step + 1} of {steps.length}: {steps[step]}</div>
+      {step === 0 && (
+        <>
+          <div className="ct-field"><div className="ct-label">Your age</div><input className="ct-textinput" type="number" style={{ maxWidth: 120 }} value={draft.age} onChange={(e) => setDraft({ ...draft, age: e.target.value })} /></div>
+          <div className="ct-field"><div className="ct-label">First day of your last period</div><input className="ct-textinput" type="date" style={{ maxWidth: 180 }} max={todayStr()} value={draft.lastPeriodStart} onChange={(e) => setDraft({ ...draft, lastPeriodStart: e.target.value })} />
+            <div className="ct-small" style={{ marginTop: 6 }}>We'll use this to work out what cycle day you're on today.</div>
+          </div>
+        </>
+      )}
+      {step === 1 && (
+        <>
+          <div className="ct-grid2">
+            <div className="ct-field"><div className="ct-label">Average cycle length (days)</div><input className="ct-textinput" type="number" value={draft.avgCycleLength} onChange={(e) => setDraft({ ...draft, avgCycleLength: Number(e.target.value) })} /></div>
+            <div className="ct-field"><div className="ct-label">Average period length (days)</div><input className="ct-textinput" type="number" value={draft.avgPeriodLength} onChange={(e) => setDraft({ ...draft, avgPeriodLength: Number(e.target.value) })} /></div>
+          </div>
+          <div className="ct-field"><div className="ct-label">Track ovulation?</div>
+            <div className="ct-chiprow">
+              <Chip active={draft.ovulationTracking} onClick={() => setDraft({ ...draft, ovulationTracking: true })}>Yes, estimate it</Chip>
+              <Chip active={!draft.ovulationTracking} onClick={() => setDraft({ ...draft, ovulationTracking: false })}>No (e.g. on contraception)</Chip>
+            </div>
+          </div>
+        </>
+      )}
+      {step === 2 && (
+        <>
+          <label className="ct-row ct-field"><input type="checkbox" checked={draft.notifEnabled} onChange={(e) => setDraft({ ...draft, notifEnabled: e.target.checked })} /><span>Daily reminder to log</span></label>
+          {draft.notifEnabled && <div className="ct-field"><div className="ct-label">Reminder time</div><input className="ct-textinput" type="time" style={{ maxWidth: 140 }} value={draft.notifTime} onChange={(e) => setDraft({ ...draft, notifTime: e.target.value })} /><div className="ct-small" style={{ marginTop: 6 }}>Saved as a preference for now — this prototype doesn't send real push notifications yet.</div></div>}
+        </>
+      )}
+      {step === 3 && (
+        <>
+          <div className="ct-small" style={{ marginBottom: 10 }}>Choose what shows up on your daily tracking screen. You can change this anytime in Settings.</div>
+          <div className="ct-chiprow">{Object.keys(DEFAULT_FIELDS).map((k) => <Chip key={k} active={draft.fields[k]} onClick={() => setDraft({ ...draft, fields: { ...draft.fields, [k]: !draft.fields[k] } })}>{FIELD_LABELS[k]}</Chip>)}</div>
+        </>
+      )}
+      {step === 4 && <div className="ct-small">You're set. Day 1 of your current cycle is {humanDate(draft.lastPeriodStart)}. Everything here can be changed later in Settings.</div>}
+      <div className="ct-row" style={{ marginTop: 24, justifyContent: "space-between" }}>
+        <button className="ct-chip" onClick={back} style={{ opacity: step === 0 ? 0.3 : 1 }} disabled={step === 0}>Back</button>
+        {step < steps.length - 1 ? <button className="ct-chip" onClick={next}>Next</button> : <button className="ct-chip" style={{ background: "var(--sage)", color: "#fff" }} onClick={() => onFinish(draft)}>Start tracking</button>}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Settings tab ---------------- */
+function SettingsTab({ settings, saveSettings }) {
+  const set = (patch) => saveSettings({ ...settings, ...patch });
+  return (
+    <div className="ct-page">
+      <div className="ct-title-sm">Profile</div>
+      <div className="ct-grid2" style={{ marginTop: 12 }}>
+        <div className="ct-field"><div className="ct-label">Age</div><input className="ct-textinput" type="number" value={settings.age} onChange={(e) => set({ age: e.target.value })} /></div>
+        <div className="ct-field"><div className="ct-label">Average cycle length</div><input className="ct-textinput" type="number" value={settings.avgCycleLength} onChange={(e) => set({ avgCycleLength: Number(e.target.value) })} /></div>
+        <div className="ct-field"><div className="ct-label">Average period length</div><input className="ct-textinput" type="number" value={settings.avgPeriodLength} onChange={(e) => set({ avgPeriodLength: Number(e.target.value) })} /></div>
+      </div>
+      <div className="ct-rule" />
+      <div className="ct-title-sm">Ovulation</div>
+      <label className="ct-row ct-field" style={{ marginTop: 10 }}><input type="checkbox" checked={settings.ovulationTracking} onChange={(e) => set({ ovulationTracking: e.target.checked })} /><span>Estimate ovulation window (turn off if not applicable, e.g. on hormonal contraception)</span></label>
+      <div className="ct-rule" />
+      <div className="ct-title-sm">Reminders</div>
+      <label className="ct-row ct-field" style={{ marginTop: 10 }}><input type="checkbox" checked={settings.notifications.enabled} onChange={(e) => set({ notifications: { ...settings.notifications, enabled: e.target.checked } })} /><span>Daily reminder to log</span></label>
+      {settings.notifications.enabled && <div className="ct-field"><input className="ct-textinput" type="time" style={{ maxWidth: 140 }} value={settings.notifications.time} onChange={(e) => set({ notifications: { ...settings.notifications, time: e.target.value } })} /><div className="ct-small" style={{ marginTop: 6 }}>Preference saved — push delivery isn't wired up in this prototype yet.</div></div>}
+      <div className="ct-rule" />
+      <div className="ct-title-sm">Tracking screen</div>
+      <div className="ct-small" style={{ margin: "10px 0" }}>Choose which daily measures to show.</div>
+      <div className="ct-chiprow">{Object.keys(DEFAULT_FIELDS).map((k) => <Chip key={k} active={settings.fields[k]} onClick={() => set({ fields: { ...settings.fields, [k]: !settings.fields[k] } })}>{FIELD_LABELS[k]}</Chip>)}</div>
+      <div className="ct-rule" />
+      <div className="ct-title-sm">Symptoms tracked</div>
+      <div className="ct-small" style={{ margin: "10px 0" }}>Turn off anything you never experience — fewer choices, faster logging.</div>
+      <div className="ct-chiprow">{SYMPTOMS.map((s) => <Chip key={s.id} active={settings.enabledSymptoms.includes(s.id)} onClick={() => set({ enabledSymptoms: settings.enabledSymptoms.includes(s.id) ? settings.enabledSymptoms.filter((x) => x !== s.id) : [...settings.enabledSymptoms, s.id] })}>{s.label}</Chip>)}</div>
+      <div className="ct-rule" />
+      <div className="ct-title-sm">Fun pattern nicknames</div>
+      <div className="ct-small" style={{ margin: "10px 0" }}>When enough data comes in, the app may notice a pattern (like energy rising late in your cycle) and give it a playful name — never a label, just for fun. You can always rename or dismiss it.</div>
+      <label className="ct-row ct-field"><input type="checkbox" checked={settings.patternNicknames} onChange={(e) => set({ patternNicknames: e.target.checked })} /><span>Show pattern nicknames</span></label>
+    </div>
+  );
+}
+
+/* ---------------- Track tab ---------------- */
+function TrackTab({ entries, selectedDate, setSelectedDate, updateEntry, dayInfo, ovulationTracking, fields, enabledSymptoms }) {
+  const entry = entries[selectedDate] || emptyEntry();
+  const patch = (f) => updateEntry(selectedDate, { ...entry, ...f });
+  const setSymptom = (id, val) => patch({ symptoms: { ...entry.symptoms, [id]: val } });
+  const visibleSymptoms = SYMPTOMS.filter((s) => enabledSymptoms.includes(s.id));
+
+  return (
+    <div className="ct-page">
+      <div className="ct-daynav">
+        <button className="ct-arrow" onClick={() => setSelectedDate(addDays(selectedDate, -1))}>‹</button>
+        <div className="ct-daynav-center">
+          <input type="date" value={selectedDate} max={todayStr()} onChange={(e) => setSelectedDate(e.target.value)} className="ct-dateinput" />
+          <div className="ct-small">{humanDate(selectedDate)}{dayInfo ? ` · cycle day ${dayInfo.cycleDay} · ${PHASES[dayInfo.phase].label}` : ""}</div>
+        </div>
+        <button className="ct-arrow" onClick={() => setSelectedDate(addDays(selectedDate, 1))} disabled={selectedDate >= todayStr()}>›</button>
+      </div>
+      <div className="ct-rule" />
+      <div className="ct-row" style={{ gap: 20, flexWrap: "wrap" }}>
+        <label className="ct-row ct-field" style={{ marginBottom: 0 }}><input type="checkbox" checked={entry.periodStart} onChange={(e) => patch({ periodStart: e.target.checked })} /><span>First day of period</span></label>
+        <label className="ct-row ct-field" style={{ marginBottom: 0 }}><input type="checkbox" checked={entry.periodEnd} onChange={(e) => patch({ periodEnd: e.target.checked })} /><span>Last day of period</span></label>
+        {ovulationTracking && <label className="ct-row ct-field" style={{ marginBottom: 0 }}><input type="checkbox" checked={entry.ovulationMarked} onChange={(e) => patch({ ovulationMarked: e.target.checked })} /><span>Ovulation observed today</span></label>}
+      </div>
+      <div className="ct-rule" />
+
+      <div className="ct-title-sm" style={{ marginBottom: 10 }}>Daily measures</div>
+      <div className="ct-grid2">
+        {fields.energy && <div className="ct-field"><div className="ct-label">Energy</div><Dots value={entry.energy} onChange={(v) => patch({ energy: v })} labels={SCALE_LABELS.energy} /></div>}
+        {fields.mood && <div className="ct-field"><div className="ct-label">Mood</div><MoodPicker value={entry.mood} onChange={(v) => patch({ mood: v })} /></div>}
+        {fields.comfort && <div className="ct-field"><div className="ct-label">Comfort (pain)</div><Dots value={entry.comfort} onChange={(v) => patch({ comfort: v })} labels={SCALE_LABELS.comfort} /></div>}
+        {fields.libido && <div className="ct-field"><div className="ct-label">Libido</div><Dots value={entry.libido} onChange={(v) => patch({ libido: v })} labels={SCALE_LABELS.libido} /></div>}
+        {fields.sleep && <div className="ct-field"><div className="ct-label">Sleep</div><Dots value={entry.sleep} onChange={(v) => patch({ sleep: v })} labels={SCALE_LABELS.sleep} /></div>}
+        {fields.appetite && <div className="ct-field"><div className="ct-label">Appetite</div><Dots value={entry.appetite} onChange={(v) => patch({ appetite: v })} labels={SCALE_LABELS.appetite} /></div>}
+      </div>
+      {fields.exercise && <div className="ct-field"><div className="ct-label">Exercise</div><div className="ct-chiprow">{EXERCISE_OPTIONS.map((o) => <Chip key={o} active={entry.exercise === o} onClick={() => patch({ exercise: entry.exercise === o ? "" : o })}>{o}</Chip>)}</div></div>}
+      {fields.need && <div className="ct-field"><div className="ct-label">What you needed today</div><div className="ct-chiprow">{NEED_OPTIONS.map((o) => <Chip key={o} active={entry.need === o} onClick={() => patch({ need: entry.need === o ? "" : o })}>{o}</Chip>)}</div></div>}
+
+      <div className="ct-rule" />
+      <div className="ct-grid2">
+        <div className="ct-field"><div className="ct-label">Flow</div><div className="ct-chiprow">{FLOWS.map((f) => <Chip key={f.id} active={entry.flow === f.id} color={FLOW_COLOR[f.id] === "transparent" ? "#8a8a7a" : FLOW_COLOR[f.id]} onClick={() => patch({ flow: f.id })}>{f.label}</Chip>)}</div></div>
+        {fields.discharge && <div className="ct-field"><div className="ct-label">Discharge</div><div className="ct-chiprow">{DISCHARGE_OPTIONS.map((c) => <Chip key={c} active={entry.discharge === c} onClick={() => patch({ discharge: entry.discharge === c ? "" : c })}>{c}</Chip>)}</div></div>}
+      </div>
+
+      <div className="ct-rule" />
+      <div className="ct-title-sm" style={{ marginBottom: 6 }}>Symptoms</div>
+      <div className="ct-small" style={{ marginBottom: 10 }}>Rate anything you noticed today.</div>
+      <div className="ct-symlist">{visibleSymptoms.map((s) => <SeverityRow key={s.id} symptom={s} value={entry.symptoms[s.id] || 0} onChange={(v) => setSymptom(s.id, v)} />)}</div>
+
+      {fields.support && (
+        <>
+          <div className="ct-rule" />
+          <div className="ct-field">
+            <div className="ct-label ct-label-ochre">Support (oils, meds, herbs...)</div>
+            <input className="ct-textinput" placeholder="e.g. lavender oil, magnesium glycinate, ginger tea" value={entry.support} onChange={(e) => patch({ support: e.target.value })} />
+            {entry.support && <div style={{ marginTop: 8 }}><span className="ct-small" style={{ marginRight: 8 }}>How much did it help?</span><Dots value={entry.supportRating} onChange={(v) => patch({ supportRating: v })} /></div>}
+          </div>
+        </>
+      )}
+      {fields.notes && <div className="ct-field"><div className="ct-label">Notes (outside factors, stress, travel...)</div><textarea className="ct-textarea" rows={3} value={entry.notes} onChange={(e) => patch({ notes: e.target.value })} /></div>}
+    </div>
+  );
+}
+
+/* ---------------- Month tab ---------------- */
+function MonthTab({ dateIndex, monthCursor, setMonthCursor, goToDate, metric, setMetric }) {
+  const [year, month] = monthCursor.split("-").map(Number);
+  const first = new Date(Date.UTC(year, month - 1, 1));
+  const startWeekday = first.getUTCDay();
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const cells = []; for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(`${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+  const shiftMonth = (n) => { const dt = new Date(Date.UTC(year, month - 1 + n, 1)); setMonthCursor(`${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}`); };
+
+  return (
+    <div className="ct-page">
+      <div className="ct-daynav">
+        <button className="ct-arrow" onClick={() => shiftMonth(-1)}>‹</button>
+        <div className="ct-daynav-center"><div className="ct-title-sm">{first.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}</div></div>
+        <button className="ct-arrow" onClick={() => shiftMonth(1)}>›</button>
+      </div>
+      <div className="ct-row" style={{ justifyContent: "center", margin: "10px 0" }}><span className="ct-small" style={{ marginRight: 8 }}>Color by</span><MetricSelect value={metric} onChange={setMetric} /></div>
+      <div className="ct-rule" />
+      <div className="ct-monthgrid ct-monthgrid-head">{["S", "M", "T", "W", "T", "F", "S"].map((d, i) => <div key={i} className="ct-small ct-center">{d}</div>)}</div>
+      <div className="ct-monthgrid">
+        {cells.map((date, i) => {
+          if (!date) return <div key={i} />;
+          const day = dateIndex[date]; const e = day?.entry; const isToday = date === todayStr();
+          const symCount = e?.symptoms ? Object.values(e.symptoms).filter((v) => v > 0).length : 0;
+          const flowIdx = e?.flow ? FLOWS.findIndex((f) => f.id === e.flow) : 0;
+          return (
+            <button key={i} className="ct-daycell" onClick={() => goToDate(date)} style={{ borderColor: isToday ? "var(--ochre)" : "var(--line)" }}>
+              <div className="ct-daytop">
+                {day && <span className="ct-phasedot" style={{ background: day.phaseColor || "var(--line)", boxShadow: e?.ovulationMarked ? "0 0 0 2px var(--paper-alt), 0 0 0 3px " + PHASES.ovulation.color : "none" }} />}
+                <span className="ct-daynum">{Number(date.slice(-2))}</span>
+              </div>
+              {e?.periodStart && <span className="ct-perioddot" title="Period start" />}
+              {metric === "flow" ? (
+                flowIdx > 0 && <div className="ct-flowdotwrap"><span className="ct-flowdot" style={{ width: 4 + flowIdx * 2, height: 4 + flowIdx * 2, background: FLOW_COLOR[e.flow] }} /></div>
+              ) : metric !== "phase" && (
+                <div className="ct-metricbar-track"><div className="ct-metricbar-fill" style={{ width: e?.[metric] ? `${(e[metric] / 5) * 100}%` : "0%" }} /></div>
+              )}
+              {symCount > 0 && <span className="ct-daysymptoms">{symCount} symptom{symCount > 1 ? "s" : ""}</span>}
+            </button>
+          );
+        })}
+      </div>
+      <div className="ct-legend">
+        {Object.entries(PHASES).map(([k, v]) => <span key={k} className="ct-legend-item"><i style={{ background: v.color, borderRadius: "50%" }} />{v.label}</span>)}
+        {metric === "flow" && <span className="ct-legend-item">Dot size = flow</span>}
+        {metric !== "phase" && metric !== "flow" && <span className="ct-legend-item">Bar fill = {METRICS.find((m) => m.id === metric)?.label.toLowerCase()}</span>}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Compare tab ---------------- */
+function CompareTab({ cycles, mode, setMode, metric, setMetric }) {
+  const maxLen = Math.max(0, ...cycles.map((c) => c.length));
+  const [dayNum, setDayNum] = useState(1);
+  const lengths = cycles.filter((c) => c.complete).map((c) => c.length);
+  const avg = lengths.length ? (lengths.reduce((a, b) => a + b, 0) / lengths.length).toFixed(1) : null;
+  const isNumericMetric = !["phase", "flow"].includes(metric);
+  const dayAverages = useMemo(() => {
+    if (!isNumericMetric) return null;
+    const out = [];
+    for (let d = 1; d <= maxLen; d++) {
+      const vals = cycles.map((c) => c.days.find((x) => x.cycleDay === d)?.entry?.[metric]).filter((v) => v > 0);
+      out.push(vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null);
+    }
+    return out;
+  }, [cycles, metric, maxLen, isNumericMetric]);
+  const peakDays = useMemo(() => {
+    if (!dayAverages) return [];
+    const max = Math.max(...dayAverages.filter((v) => v != null));
+    if (!isFinite(max)) return [];
+    return dayAverages.map((v, i) => (v === max ? i + 1 : null)).filter((v) => v != null);
+  }, [dayAverages]);
+  if (cycles.length === 0) return <div className="ct-page"><EmptyState text="Mark a “first day of period” on the Track tab to start comparing cycles." /></div>;
+
+  return (
+    <div className="ct-page">
+      <div className="ct-row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div className="ct-chiprow"><Chip active={mode === "grid"} onClick={() => setMode("grid")}>Grid — all cycles</Chip><Chip active={mode === "day"} onClick={() => setMode("day")}>Single day</Chip></div>
+        {mode === "grid" && <div className="ct-row"><span className="ct-small" style={{ marginRight: 8 }}>Color by</span><MetricSelect value={metric} onChange={setMetric} /></div>}
+      </div>
+      {avg && <div className="ct-small" style={{ margin: "10px 0" }}>Average cycle length: {avg} days, across {lengths.length} completed cycle{lengths.length > 1 ? "s" : ""}</div>}
+      {mode === "grid" && isNumericMetric && peakDays.length > 0 && (
+        <div className="ct-small" style={{ marginBottom: 10 }}>Across your cycles, {METRICS.find((m) => m.id === metric)?.label.toLowerCase()} tends to peak around cycle day{peakDays.length > 1 ? "s" : ""} <strong>{peakDays.join(", ")}</strong> — marked below. Worth planning the good stuff around there.</div>
+      )}
+      <div className="ct-rule" />
+      {mode === "grid" ? (
+        <div className="ct-comparewrap">
+          <table className="ct-comparetable">
+            <thead><tr><th>Cycle</th>{Array.from({ length: maxLen }).map((_, i) => <th key={i} style={peakDays.includes(i + 1) ? { color: "var(--ochre)" } : {}}>{i + 1}</th>)}</tr></thead>
+            <tbody>
+              {cycles.map((c, ci) => (
+                <tr key={ci}>
+                  <td className="ct-small">Cycle {ci + 1}<div>{humanShort(c.start)}{!c.complete ? " *" : ""}</div></td>
+                  {Array.from({ length: maxLen }).map((_, i) => {
+                    const day = c.days.find((d) => d.cycleDay === i + 1);
+                    const symCount = day?.entry?.symptoms ? Object.values(day.entry.symptoms).filter((v) => v > 0).length : 0;
+                    const isPeak = day && peakDays.includes(i + 1) && day.entry?.[metric] > 0;
+                    return <td key={i}>{day ? <div className="ct-cellstack"><div className="ct-flowswatch" style={isPeak ? { boxShadow: "0 0 0 2px var(--ochre)" } : {}}><div className="ct-flowswatch-fill" style={{ background: colorForMetric(day, metric) }} /></div>{symCount > 0 && <span className="ct-microbadge">{symCount}</span>}</div> : <span className="ct-small">—</span>}</td>;
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="ct-small" style={{ marginTop: 8 }}>* current, ongoing cycle · scroll sideways to see the full cycle</div>
+        </div>
+      ) : (
+        <>
+          <div className="ct-field" style={{ maxWidth: 220 }}><div className="ct-label">Cycle day</div><select className="ct-textinput" value={dayNum} onChange={(e) => setDayNum(Number(e.target.value))}>{Array.from({ length: maxLen }).map((_, i) => <option key={i} value={i + 1}>Day {i + 1}</option>)}</select></div>
+          <div className="ct-cardrow">
+            {cycles.map((c) => c.days.find((d) => d.cycleDay === dayNum)).filter(Boolean).map((m, i) => (
+              <div key={i} className="ct-daycard">
+                <div className="ct-small" style={{ marginBottom: 6 }}>{humanDate(m.date)}</div>
+                <div className="ct-flowswatch ct-flowswatch-lg" style={{ background: m.entry?.flow && m.entry.flow !== "none" ? FLOW_COLOR[m.entry.flow] : "var(--paper-alt)" }} />
+                <div className="ct-small" style={{ marginTop: 6 }}>{PHASES[m.phase]?.label}</div>
+                {m.entry?.mood > 0 && <div className="ct-small">Mood: {MOOD_EMOJI[m.entry.mood - 1]}</div>}
+                {m.entry?.comfort > 0 && <div className="ct-small">Comfort: {SCALE_LABELS.comfort[m.entry.comfort - 1]}</div>}
+                {m.entry?.symptoms && Object.entries(m.entry.symptoms).filter(([, v]) => v > 0).length > 0 && <div className="ct-small">{Object.entries(m.entry.symptoms).filter(([, v]) => v > 0).map(([id, v]) => `${SYMPTOMS.find((s) => s.id === id)?.label} (${SEVERITY_LEVELS[v]})`).join(", ")}</div>}
+                {m.entry?.support && <div className="ct-small" style={{ color: "var(--ochre)" }}>{m.entry.support}</div>}
+                {!m.entry && <div className="ct-small">Nothing logged</div>}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Protocols tab ---------------- */
+function ProtocolsTab({ protocols, saveProtocols }) {
+  const [showNew, setShowNew] = useState(false);
+  const [draft, setDraft] = useState({ name: "", symptom: "", recipe: "" });
+  const [trialForms, setTrialForms] = useState({});
+  const addProtocol = () => { if (!draft.name.trim()) return; const p = { id: uid(), ...draft, createdDate: todayStr(), trials: [] }; saveProtocols({ ...protocols, [p.id]: p }); setDraft({ name: "", symptom: "", recipe: "" }); setShowNew(false); };
+  const openTrial = (id) => setTrialForms({ ...trialForms, [id]: trialForms[id] || { date: todayStr(), checkpoints: {}, rating: 0, notes: "" } });
+  const saveTrial = (id) => { const t = trialForms[id]; const p = protocols[id]; saveProtocols({ ...protocols, [id]: { ...p, trials: [...p.trials, { id: uid(), ...t }] } }); const rest = { ...trialForms }; delete rest[id]; setTrialForms(rest); };
+
+  return (
+    <div className="ct-page">
+      <div className="ct-title-sm">Testing protocols</div>
+      <div className="ct-small" style={{ marginBottom: 14 }}>Track a remedy against a recurring symptom, and log what you notice over time.</div>
+      <button className="ct-chip" style={{ marginBottom: 16 }} onClick={() => setShowNew(!showNew)}>{showNew ? "Cancel" : "+ New protocol"}</button>
+      {showNew && (
+        <div className="ct-daycard" style={{ width: "auto", marginBottom: 20 }}>
+          <div className="ct-field"><div className="ct-label">Name</div><input className="ct-textinput" placeholder="e.g. Magnesium for day-26 headaches" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
+          <div className="ct-field"><div className="ct-label">Symptom targeted</div><input className="ct-textinput" placeholder="e.g. Headache" value={draft.symptom} onChange={(e) => setDraft({ ...draft, symptom: e.target.value })} /></div>
+          <div className="ct-field"><div className="ct-label">Recipe / protocol notes</div><textarea className="ct-textarea" rows={3} value={draft.recipe} onChange={(e) => setDraft({ ...draft, recipe: e.target.value })} /></div>
+          <button className="ct-chip" onClick={addProtocol}>Save protocol</button>
+        </div>
+      )}
+      {Object.keys(protocols).length === 0 && !showNew && <EmptyState text="No protocols yet. Start one when you want to test whether something actually helps." />}
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {Object.values(protocols).sort((a, b) => b.createdDate.localeCompare(a.createdDate)).map((p) => (
+          <div key={p.id} className="ct-daycard" style={{ width: "auto" }}>
+            <div className="ct-title-sm">{p.name}</div>
+            {p.symptom && <div className="ct-small">Targeting: {p.symptom}</div>}
+            {p.recipe && <div className="ct-small" style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{p.recipe}</div>}
+            <div className="ct-rule" />
+            <div className="ct-small" style={{ marginBottom: 8 }}>{p.trials.length} trial{p.trials.length !== 1 ? "s" : ""} logged</div>
+            {p.trials.map((t) => (
+              <div key={t.id} className="ct-small" style={{ marginBottom: 6, paddingLeft: 8, borderLeft: "2px solid var(--line)" }}>
+                {humanDate(t.date)}{t.rating > 0 ? ` · helped: ${t.rating}/5` : ""}
+                {CHECKPOINTS.filter((c) => t.checkpoints[c]).map((c) => <div key={c}>{c}: {t.checkpoints[c]}</div>)}
+                {t.notes && <div>{t.notes}</div>}
+              </div>
+            ))}
+            {!trialForms[p.id] ? <button className="ct-chip" onClick={() => openTrial(p.id)}>+ Log a trial</button> : (
+              <div style={{ marginTop: 8 }}>
+                <input className="ct-textinput" type="date" value={trialForms[p.id].date} max={todayStr()} onChange={(e) => setTrialForms({ ...trialForms, [p.id]: { ...trialForms[p.id], date: e.target.value } })} />
+                <div className="ct-small" style={{ margin: "8px 0 4px" }}>What did you notice, over time?</div>
+                {CHECKPOINTS.map((c) => (
+                  <div key={c} className="ct-row" style={{ marginBottom: 4 }}>
+                    <span className="ct-small" style={{ width: 60, flexShrink: 0 }}>{c}</span>
+                    <input className="ct-textinput" value={trialForms[p.id].checkpoints[c] || ""} onChange={(e) => setTrialForms({ ...trialForms, [p.id]: { ...trialForms[p.id], checkpoints: { ...trialForms[p.id].checkpoints, [c]: e.target.value } } })} />
+                  </div>
+                ))}
+                <div className="ct-row" style={{ margin: "8px 0" }}><span className="ct-small" style={{ marginRight: 8 }}>Overall, did it help?</span><Dots value={trialForms[p.id].rating} onChange={(v) => setTrialForms({ ...trialForms, [p.id]: { ...trialForms[p.id], rating: v } })} /></div>
+                <textarea className="ct-textarea" rows={2} placeholder="Any other notes" value={trialForms[p.id].notes} onChange={(e) => setTrialForms({ ...trialForms, [p.id]: { ...trialForms[p.id], notes: e.target.value } })} />
+                <button className="ct-chip" style={{ marginTop: 8 }} onClick={() => saveTrial(p.id)}>Save trial</button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Notes tab ---------------- */
+function NotesTab({ notes, saveNotes }) {
+  const [showNew, setShowNew] = useState(false);
+  const [draft, setDraft] = useState({ title: "", body: "" });
+  const add = () => { if (!draft.title.trim()) return; saveNotes({ ...notes, [uid()]: { ...draft, date: todayStr() } }); setDraft({ title: "", body: "" }); setShowNew(false); };
+  return (
+    <div className="ct-page">
+      <div className="ct-title-sm">Notes & findings</div>
+      <div className="ct-small" style={{ marginBottom: 14 }}>A private place for what you've learned about your own body — write-ups, favorite recipes, things worth remembering.</div>
+      <button className="ct-chip" style={{ marginBottom: 16 }} onClick={() => setShowNew(!showNew)}>{showNew ? "Cancel" : "+ New entry"}</button>
+      {showNew && (
+        <div className="ct-daycard" style={{ width: "auto", marginBottom: 20 }}>
+          <div className="ct-field"><div className="ct-label">Title</div><input className="ct-textinput" value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></div>
+          <div className="ct-field"><div className="ct-label">Write-up</div><textarea className="ct-textarea" rows={5} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} /></div>
+          <button className="ct-chip" onClick={add}>Save entry</button>
+        </div>
+      )}
+      {Object.keys(notes).length === 0 && !showNew && <EmptyState text="Nothing here yet." />}
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {Object.values(notes).sort((a, b) => b.date.localeCompare(a.date)).map((n, i) => (
+          <div key={i} className="ct-daycard" style={{ width: "auto" }}>
+            <div className="ct-small">{humanDate(n.date)}</div>
+            <div className="ct-title-sm" style={{ fontSize: 16, margin: "2px 0 6px" }}>{n.title}</div>
+            <div className="ct-small" style={{ whiteSpace: "pre-wrap" }}>{n.body}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- App ---------------- */
+function CycleTracker() {
+  const [entries, setEntries] = useState({});
+  const [protocols, setProtocols] = useState({});
+  const [notes, setNotes] = useState({});
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState("track");
+  const [selectedDate, setSelectedDate] = useState(todayStr());
+  const [monthCursor, setMonthCursor] = useState(todayStr().slice(0, 7));
+  const [monthMetric, setMonthMetric] = useState("phase");
+  const [compareMode, setCompareMode] = useState("grid");
+  const [compareMetric, setCompareMetric] = useState("phase");
+  const [dismissedPattern, setDismissedPattern] = useState(null);
+  const saveTimer = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      try { const r = await window.storage.get("cycle-entries", false); if (r?.value) setEntries(JSON.parse(r.value)); } catch (e) {}
+      try { const r = await window.storage.get("cycle-protocols", false); if (r?.value) setProtocols(JSON.parse(r.value)); } catch (e) {}
+      try { const r = await window.storage.get("cycle-notes", false); if (r?.value) setNotes(JSON.parse(r.value)); } catch (e) {}
+      try { const r = await window.storage.get("cycle-settings", false); if (r?.value) setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(r.value) }); } catch (e) {}
+      setLoaded(true);
+    })();
+  }, []);
+
+  const updateEntry = (date, entry) => {
+    const next = { ...entries, [date]: entry }; setEntries(next);
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => { try { await window.storage.set("cycle-entries", JSON.stringify(next), false); } catch (e) {} }, 500);
+  };
+  const saveProtocols = (next) => { setProtocols(next); window.storage.set("cycle-protocols", JSON.stringify(next), false).catch(() => {}); };
+  const saveNotes = (next) => { setNotes(next); window.storage.set("cycle-notes", JSON.stringify(next), false).catch(() => {}); };
+  const saveSettings = (next) => { setSettings(next); window.storage.set("cycle-settings", JSON.stringify(next), false).catch(() => {}); };
+
+  const finishOnboarding = (draft) => {
+    const newSettings = { onboarded: true, ovulationTracking: draft.ovulationTracking, age: draft.age, avgCycleLength: draft.avgCycleLength, avgPeriodLength: draft.avgPeriodLength, notifications: { enabled: draft.notifEnabled, time: draft.notifTime }, fields: draft.fields, enabledSymptoms: SYMPTOMS.map((s) => s.id) };
+    saveSettings(newSettings);
+    const seeded = { ...entries, [draft.lastPeriodStart]: { ...emptyEntry(), periodStart: true } };
+    setEntries(seeded); window.storage.set("cycle-entries", JSON.stringify(seeded), false).catch(() => {});
+  };
+
+  const rawCycles = useMemo(() => computeCycles(entries), [entries]);
+  const stats = useMemo(() => computeStats(rawCycles, settings), [rawCycles, settings.avgCycleLength, settings.avgPeriodLength]);
+  const cycles = useMemo(() => annotatePhases(rawCycles, stats, settings.ovulationTracking), [rawCycles, stats, settings.ovulationTracking]);
+  const dateIndex = useMemo(() => buildDateIndex(cycles), [cycles]);
+  const patternInsight = useMemo(() => computePatternInsight(cycles), [cycles]);
+
+  const TABS = [{ id: "track", label: "Track" }, { id: "month", label: "Month" }, { id: "compare", label: "Compare" }, { id: "protocols", label: "Protocols" }, { id: "notes", label: "Notes" }, { id: "settings", label: "Settings" }];
+
+  return (
+    <div className="ct-root">
+      <style>{`
+        .ct-root { --paper:#F7F2E9; --paper-alt:#EFE8D9; --ink:#332E22; --sage:#566246; --sage-dark:#3E4934;
+          --rose:#B5697A; --ochre:#C08A3E; --line:#DAD0BC;
+          background:var(--paper); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+          display:flex; min-height:560px; border:1px solid var(--line); max-width:960px; margin:0 auto; }
+        .ct-tabs { display:flex; flex-direction:column; width:132px; flex-shrink:0; padding-top:28px; gap:2px; }
+        .ct-tab { text-align:left; border:none; border-left:4px solid transparent; background:transparent; padding:12px 10px;
+          font-family:Georgia,"Iowan Old Style",serif; font-size:14.5px; cursor:pointer; color:var(--ink); opacity:.6; }
+        .ct-tab.active { opacity:1; background:var(--paper-alt); border-left-color:var(--sage); }
+        .ct-main { flex:1; padding:26px 30px; min-width:0; }
+        .ct-page { max-width:680px; }
+        .ct-heading { font-family:Georgia,"Iowan Old Style",serif; font-size:24px; margin:0 0 4px; }
+        .ct-sub { font-size:13px; color:#6b6552; margin-bottom:18px; }
+        .ct-rule { height:1px; background:var(--line); margin:14px 0; }
+        .ct-field { margin-bottom:18px; }
+        .ct-row { display:flex; align-items:center; gap:8px; }
+        .ct-label { font-size:12.5px; color:#6b6552; margin-bottom:8px; }
+        .ct-label-ochre { color:var(--ochre); }
+        .ct-chiprow { display:flex; flex-wrap:wrap; gap:8px; }
+        .ct-chip { border:1.4px solid var(--line); border-radius:3px; padding:6px 12px; font-size:13.5px; cursor:pointer; background:transparent; color:var(--ink); }
+        .ct-textinput, .ct-textarea { width:100%; border:none; border-bottom:1.4px solid var(--line); background:transparent;
+          padding:6px 2px; font-size:14.5px; font-family:inherit; color:var(--ink); box-sizing:border-box; }
+        .ct-textinput:focus, .ct-textarea:focus { outline:none; border-bottom-color:var(--sage); }
+        .ct-grid2 { display:grid; grid-template-columns:1fr 1fr; gap:20px 24px; }
+        .ct-small { font-size:12.5px; color:#6b6552; }
+        .ct-daynav { display:flex; align-items:center; justify-content:space-between; }
+        .ct-daynav-center { text-align:center; flex:1; }
+        .ct-arrow { background:transparent; border:1px solid var(--line); width:32px; height:32px; border-radius:50%; cursor:pointer; font-size:16px; }
+        .ct-dateinput { border:none; background:transparent; font-family:Georgia,serif; font-size:18px; color:var(--ink); text-align:center; }
+        .ct-title-sm { font-family:Georgia,"Iowan Old Style",serif; font-size:19px; }
+        .ct-center { text-align:center; }
+        .ct-monthgrid { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; margin-top:10px; }
+        .ct-monthgrid-head { margin-top:14px; margin-bottom:0; }
+        .ct-daycell { position:relative; aspect-ratio:1; border:1.2px solid var(--line); border-radius:4px; cursor:pointer; background:var(--paper-alt);
+          display:flex; flex-direction:column; align-items:flex-start; justify-content:flex-start; padding:5px 5px 6px; }
+        .ct-daytop { display:flex; align-items:center; gap:4px; }
+        .ct-phasedot { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+        .ct-daynum { font-size:12px; color:var(--ink); }
+        .ct-perioddot { position:absolute; top:4px; right:4px; width:5px; height:5px; border-radius:50%; background:var(--ochre); }
+        .ct-daysymptoms { font-size:7.5px; color:#6b6552; margin-top:auto; }
+        .ct-metricbar-track { width:100%; height:3px; background:var(--line); border-radius:2px; margin-top:auto; overflow:hidden; }
+        .ct-metricbar-fill { height:100%; background:var(--ochre); border-radius:2px; }
+        .ct-flowdotwrap { display:flex; justify-content:center; margin-top:auto; padding-bottom:2px; }
+        .ct-flowdot { border-radius:50%; display:inline-block; }
+        .ct-legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:16px; }
+        .ct-legend-item { display:flex; align-items:center; gap:6px; font-size:12px; color:#6b6552; }
+        .ct-legend-item i { width:10px; height:10px; display:inline-block; border:1px solid var(--line); }
+        .ct-comparewrap { overflow-x:auto; }
+        .ct-comparetable { border-collapse:collapse; width:100%; }
+        .ct-comparetable th, .ct-comparetable td { border-bottom:1px solid var(--line); padding:5px 8px; text-align:center; font-size:12.5px; }
+        .ct-comparetable th { font-family:Georgia,serif; font-weight:normal; }
+        .ct-cellstack { display:flex; flex-direction:column; align-items:center; gap:2px; }
+        .ct-flowswatch { width:16px; height:16px; border-radius:3px; border:1px solid var(--line); margin:0 auto; box-sizing:border-box; overflow:hidden; }
+        .ct-flowswatch-fill { width:100%; height:100%; }
+        .ct-flowswatch-lg { width:34px; height:34px; border-radius:5px; }
+        .ct-microbadge { font-size:8.5px; color:#6b6552; }
+        .ct-cardrow { display:flex; flex-wrap:wrap; gap:14px; }
+        .ct-daycard { border:1.2px solid var(--line); border-radius:5px; padding:14px; width:180px; }
+        .ct-empty { padding:30px 10px; color:#6b6552; font-size:14px; max-width:400px; }
+        .ct-symlist { display:flex; flex-direction:column; gap:6px; }
+        .ct-symrow { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; padding:4px 0; border-bottom:1px solid var(--line); }
+        .ct-symlabel { font-size:13.5px; min-width:150px; }
+        .ct-sevchips { display:flex; gap:6px; }
+        .ct-sevchip { border:1.2px solid var(--line); border-radius:3px; padding:3px 8px; font-size:11.5px; cursor:pointer; background:transparent; color:var(--ink); }
+        @media (max-width:640px) {
+          .ct-root { flex-direction:column; }
+          .ct-tabs { flex-direction:row; width:100%; overflow-x:auto; padding-top:0; }
+          .ct-tab { border-left:none; border-bottom:4px solid transparent; white-space:nowrap; }
+          .ct-tab.active { border-bottom-color:var(--sage); background:transparent; }
+          .ct-grid2 { grid-template-columns:1fr; }
+        }
+      `}</style>
+
+      {!loaded ? (
+        <div className="ct-main"><div className="ct-small">Loading…</div></div>
+      ) : !settings.onboarded ? (
+        <div className="ct-main"><Onboarding onFinish={finishOnboarding} /></div>
+      ) : (
+        <>
+          <div className="ct-tabs">{TABS.map((t) => <button key={t.id} className={`ct-tab${tab === t.id ? " active" : ""}`} onClick={() => setTab(t.id)}>{t.label}</button>)}</div>
+          <div className="ct-main">
+            <div className="ct-heading">Cycle diary</div>
+            <div className="ct-sub">Track your cycle, notice the patterns, and see what actually helps.</div>
+            {settings.patternNicknames && patternInsight && dismissedPattern !== patternInsight.key && (
+              <PatternBanner insight={patternInsight} settings={settings} saveSettings={saveSettings} onDismiss={() => setDismissedPattern(patternInsight.key)} />
+            )}
+            {tab === "track" && <TrackTab entries={entries} selectedDate={selectedDate} setSelectedDate={setSelectedDate} updateEntry={updateEntry} dayInfo={dateIndex[selectedDate]} ovulationTracking={settings.ovulationTracking} fields={settings.fields} enabledSymptoms={settings.enabledSymptoms} />}
+            {tab === "month" && <MonthTab dateIndex={dateIndex} monthCursor={monthCursor} setMonthCursor={setMonthCursor} goToDate={(d) => { setSelectedDate(d); setTab("track"); }} metric={monthMetric} setMetric={setMonthMetric} />}
+            {tab === "compare" && <CompareTab cycles={cycles} mode={compareMode} setMode={setCompareMode} metric={compareMetric} setMetric={setCompareMetric} />}
+            {tab === "protocols" && <ProtocolsTab protocols={protocols} saveProtocols={saveProtocols} />}
+            {tab === "notes" && <NotesTab notes={notes} saveNotes={saveNotes} />}
+            {tab === "settings" && <SettingsTab settings={settings} saveSettings={saveSettings} />}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<CycleTracker />);
+</script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(() => {}); });
+  }
+</script>
+</body>
+</html>
